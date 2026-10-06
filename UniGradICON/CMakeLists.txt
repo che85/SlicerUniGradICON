@@ -6,6 +6,9 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   UniGradICONHelpers/__init__.py
   UniGradICONHelpers/icon_helper.py
+  UniGradICONHelpers/registration.py
+  UniGradICONHelpers/remote.py
+  UniGradICONServer/server.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -13,6 +16,8 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Presets/multigradicon.json
   Resources/Presets/unigradicon.json
   Resources/UI/${MODULE_NAME}.ui
+  UniGradICONServer/README.md
+  UniGradICONServer/requirements.txt
   )
 
 set(EXTENSION_HOMEPAGE "https://github.com/uncbiag/SlicerUniGradICON")
