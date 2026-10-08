@@ -37,6 +37,11 @@ def available_devices():
   return [DEVICE_CPU, DEVICE_GPU] if torch.cuda.is_available() else [DEVICE_CPU]
 
 
+def gpu_count():
+  import torch
+  return torch.cuda.device_count()
+
+
 def available_models(weights_dir):
   return [name for name, (file_name, _) in MODEL_WEIGHTS.items()
           if os.path.exists(os.path.join(weights_dir, file_name))]
@@ -148,14 +153,17 @@ def process_exists(pid):
   return True
 
 
-def serve_registrations(requests, messages, cancel_flag):
+def serve_registrations(requests, messages, cancel_flag, gpu=None):
   """Loop of the registration server's worker process: one registration at a time.
 
   Takes keyword arguments of register_files from ``requests`` (None stops it) and reports on
   ``messages``: ("progress", {...}), ("done", (transform_path, warped_path)), ("cancelled", None)
   or ("failed", message). A set ``cancel_flag`` stops a registration at its next step.
   It also stops when the server is gone, so a killed server does not leave it behind.
+  ``gpu`` is the index of the only GPU it uses.
   """
+  if gpu is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)  # before PyTorch is imported
   server = os.getppid()
   while True:
     try:

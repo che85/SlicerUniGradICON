@@ -37,6 +37,10 @@ on first use if missing.
 
 - The images are sent to the server. Use a token, and outside a trusted network put the server
   behind HTTPS (for example a reverse proxy); the server itself speaks plain HTTP.
-- Jobs run one at a time in the order they arrive. Finished jobs and their files are removed
-  after the client downloads the results, or after an hour.
+- Jobs run in the order they arrive: one at a time on the CPU, and **Jobs per GPU**
+  (`--jobs-per-gpu`, default 1) at a time on each GPU. Each of those keeps its own copy of the
+  model in GPU memory and needs memory for its images on top, so try a higher number only with
+  GPU memory to spare; jobs that run out of it fail. On one GPU, jobs at the same time share its
+  compute, so the gain is mostly in overlapping transfers, loading and resampling. Finished jobs
+  and their files are removed after the client downloads the results, or after an hour.
 - `pytest test_server.py` tests the server with a fake registration (needs `httpx` and `pytest`).

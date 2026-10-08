@@ -155,6 +155,23 @@ def test_queued_jobs_report_their_position():
   assert len(fake.calls) == 2  # the cancelled one never ran
 
 
+def test_jobs_run_concurrently_on_each_gpu():
+  fake = FakeRegistration()
+  fake.release.clear()
+  client = TestClient(server.create_app(register=fake, devices=["CPU", "GPU"], gpus=2, jobs_per_gpu=2))
+  info = client.get("/info").json()
+  assert (info["gpus"], info["jobsPerGpu"]) == (2, 2)
+  gpu_jobs = [submit(client, dict(PARAMS, device="GPU")).json() for _ in range(5)]
+  cpu_job = submit(client).json()
+  for job in gpu_jobs[:4] + [cpu_job]:
+    wait_for(client, job["id"], ("running",))
+  assert client.get(f"/jobs/{gpu_jobs[4]['id']}").json()["queuePosition"] == 0  # CPU jobs do not count
+  fake.release.set()
+  for job in gpu_jobs + [cpu_job]:
+    wait_for(client, job["id"], ("done",))
+  assert len(fake.calls) == 6
+
+
 def test_invalid_parameters_are_rejected():
   client = client_for(FakeRegistration())
   assert submit(client, dict(PARAMS, device="GPU")).status_code == 400

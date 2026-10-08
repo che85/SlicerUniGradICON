@@ -87,6 +87,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
   SERVER_URL_SETTING = SERVER_URL_SETTING
   SERVER_URL_HISTORY_SETTING = "UniGradICON/ServerUrlHistory"
   SERVER_PORT_SETTING = "UniGradICON/ServerPort"
+  SERVER_JOBS_PER_GPU_SETTING = "UniGradICON/ServerJobsPerGpu"
   LOG_CONSOLE_SETTING = "UniGradICON/ServerLogToConsole"
   LOG_GUI_SETTING = "UniGradICON/ServerLogToGui"
   DEFAULT_SERVER_PORT = 8899
@@ -196,6 +197,9 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     self.ui.portSpinBox.value = int(settings.value(self.SERVER_PORT_SETTING) or self.DEFAULT_SERVER_PORT)
     self.ui.portSpinBox.valueChanged.connect(lambda port: qt.QSettings().setValue(self.SERVER_PORT_SETTING, str(port)))
+    self.ui.jobsPerGpuSpinBox.value = int(settings.value(self.SERVER_JOBS_PER_GPU_SETTING) or 1)
+    self.ui.jobsPerGpuSpinBox.valueChanged.connect(
+      lambda jobs: qt.QSettings().setValue(self.SERVER_JOBS_PER_GPU_SETTING, str(jobs)))
     for checkBox, key in ((self.ui.logConsoleCheckBox, self.LOG_CONSOLE_SETTING),
                           (self.ui.logGuiCheckBox, self.LOG_GUI_SETTING)):
       if settings.value(key) is not None:
@@ -351,6 +355,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self.ui.serverButton.blockSignals(wasBlocked)
     self.ui.serverButton.text = "Running ..." if serverRunning else "Start server"
     self.ui.portSpinBox.enabled = self.ui.serverTokenLineEdit.enabled = not serverRunning
+    self.ui.jobsPerGpuSpinBox.enabled = not serverRunning
     for widget in (self.ui.serverAddressTitleLabel, self.ui.serverAddressLabel, self.ui.copyServerAddressButton):
       widget.visible = serverRunning
     self.ui.serverAddressLabel.text = self._webServer.address if serverRunning else ""
@@ -409,7 +414,9 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self.saveServerUrl(url)
     # remembered on this computer, for registrations run without this panel (never in the scene)
     self.logic.setServerToken(url, token)
-    self.addLog(f"Connected to {client.url} (devices: {', '.join(self._serverInfo['devices'])}).")
+    capacity = (f", {self._serverInfo['jobsPerGpu']} job(s) at a time on each of {self._serverInfo['gpus']} GPU(s)"
+                if self._serverInfo.get("gpus") else "")
+    self.addLog(f"Connected to {client.url} (devices: {', '.join(self._serverInfo['devices'])}{capacity}).")
     self.updateDeviceChoices()
     self.updateProcessingGUI()
     return client
@@ -487,7 +494,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       return
     token = self.ui.serverTokenLineEdit.text
     self._webServer = RegistrationServerProcess(
-      self.ui.portSpinBox.value, token, self.checkpointFolder,
+      self.ui.portSpinBox.value, token, self.checkpointFolder, jobsPerGpu=self.ui.jobsPerGpuSpinBox.value,
       logCallback=self.addServerLog, stoppedCallback=self.onServerStopped)
     self._webServer.start()
     if token:
@@ -1234,9 +1241,11 @@ class RegistrationServerProcess:
 
   OUTPUT_CHECK_INTERVAL_MS = 200
 
-  def __init__(self, port, token=None, weightsDir=None, host="0.0.0.0", logCallback=None, stoppedCallback=None):
+  def __init__(self, port, token=None, weightsDir=None, host="0.0.0.0", jobsPerGpu=1, logCallback=None,
+               stoppedCallback=None):
     import socket
     self.port = port
+    self.jobsPerGpu = jobsPerGpu
     self.token = token
     self.weightsDir = weightsDir
     self.host = host
@@ -1251,7 +1260,7 @@ class RegistrationServerProcess:
     import queue
     import threading
     script = os.path.join(os.path.dirname(__file__), "UniGradICONServer", "server.py")
-    arguments = ["--host", self.host, "--port", str(self.port)]
+    arguments = ["--host", self.host, "--port", str(self.port), "--jobs-per-gpu", str(self.jobsPerGpu)]
     if self.weightsDir:
       arguments += ["--weights-dir", self.weightsDir]
     # sys.executable is the PythonSlicer launcher, which runs the actual Python as its child:

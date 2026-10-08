@@ -9,7 +9,8 @@ Start it from the UniGradICON module ("Start server"), or without Slicer:
     pip install -r requirements.txt
     python server.py --host 0.0.0.0 --port 8899 --token <secret>
 
-Jobs run one at a time, in the order they arrive; the model stays loaded between them.
+Jobs run in the order they arrive: one at a time on the CPU, and --jobs-per-gpu at a time on each
+GPU. Each of those runs in its own process, which keeps the model loaded between jobs.
 """
 
 import argparse
@@ -92,8 +93,9 @@ class ProcessRegistrationRunner:
   the server it would stall the server until it could not even answer a status request.
   """
 
-  def __init__(self):
+  def __init__(self, gpu=None):
     self.context = multiprocessing.get_context("spawn")
+    self.gpu = gpu
     self.process = None
 
   def stop(self):
@@ -107,7 +109,7 @@ class ProcessRegistrationRunner:
     self.messages = self.context.Queue()
     self.cancel_flag = self.context.Value("b", 0)
     self.process = self.context.Process(
-      target=registration.serve_registrations, args=(self.requests, self.messages, self.cancel_flag),
+      target=registration.serve_registrations, args=(self.requests, self.messages, self.cancel_flag, self.gpu),
       name="registration", daemon=True)
     self.process.start()
 
@@ -168,15 +170,14 @@ def validate_params(params, devices):
   }
 
 
-def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devices=None):
-  """The server application. ``register`` and ``devices`` are replaceable for testing."""
+def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devices=None, jobs_per_gpu=1, gpus=None):
+  """The server application. ``register``, ``devices`` and ``gpus`` (their number) are replaceable for testing."""
   app = FastAPI(title="UniGradICON registration server")
   jobs = {}
-  pending = queue.Queue()
+  pending = {registration.DEVICE_CPU: queue.Queue(), registration.DEVICE_GPU: queue.Queue()}
   lock = threading.Lock()
   work_root = tempfile.mkdtemp(prefix="unigradicon-server-")
   device_list = devices
-  runner = ThreadRegistrationRunner(register) if register else ProcessRegistrationRunner()
 
   def server_devices():
     nonlocal device_list
@@ -202,11 +203,12 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
   def queue_position(job):
     if job.state != QUEUED:
       return None
-    return sum(1 for other in jobs.values() if other.state == QUEUED and other.order < job.order)
+    return sum(1 for other in jobs.values() if other.state == QUEUED and other.order < job.order
+               and other.params["device"] == job.params["device"])
 
-  def run_job(job):
+  def run_job(job, runner, place):
     params = job.params
-    logging.info("Job %s started", job.id[:8])
+    logging.info("Job %s started on %s", job.id[:8], place)
     started = time.time()
     arguments = {
       "fixed_path": job.fixed_path, "moving_path": job.moving_path,
@@ -232,16 +234,33 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
       with lock:
         remove_job(job)
 
-  def worker():
-    while True:
-      job = pending.get()
-      if job.cancel.is_set():
-        continue  # cancelled while queued; already removed
-      job.state = RUNNING
-      run_job(job)
+  def worker(device, gpu=None):
+    runner = ThreadRegistrationRunner(register) if register else ProcessRegistrationRunner(gpu)
+    runners.append(runner)
+    place = device if gpu is None else f"{device} {gpu}"
 
-  threading.Thread(target=worker, name="registration-worker", daemon=True).start()
-  app.state.runner = runner
+    def loop():
+      while True:
+        job = pending[device].get()
+        if job.cancel.is_set():
+          continue  # cancelled while queued; already removed
+        job.state = RUNNING
+        run_job(job, runner, place)
+
+    threading.Thread(target=loop, name=f"registration-worker-{place}", daemon=True).start()
+
+  runners = []
+  worker(registration.DEVICE_CPU)
+  gpu_total = 0
+  if registration.DEVICE_GPU in server_devices():
+    gpu_total = registration.gpu_count() if gpus is None else gpus
+    for gpu in range(gpu_total):
+      for _ in range(jobs_per_gpu):
+        worker(registration.DEVICE_GPU, gpu)
+  app.state.runners = runners
+  if gpu_total:
+    logging.info("Registrations run one at a time on the CPU and %d at a time on each of %d GPU(s).",
+                 jobs_per_gpu, gpu_total)
   order = iter(range(1 << 62))
 
   def get_job(job_id):
@@ -259,6 +278,8 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
       "models": list(registration.MODEL_WEIGHTS),
       "modalities": list(MODALITIES),
       "losses": list(LOSSES),
+      "gpus": gpu_total,
+      "jobsPerGpu": jobs_per_gpu,
     }
 
   @app.post("/jobs", dependencies=[Depends(check_token)])
@@ -282,7 +303,7 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
         shutil.copyfileobj(upload.file, f)
     with lock:
       jobs[job.id] = job
-    pending.put(job)
+    pending[job_params["device"]].put(job)
     logging.info("Job %s received: %s %s -> %s, %s, %d IO steps on %s%s", job.id[:8], job_params["model"],
                  job_params["moving_modality"], job_params["fixed_modality"], job_params["loss"],
                  job_params["io_steps"], job_params["device"], ", fixed mask" if job.fixed_mask_path else "")
@@ -326,14 +347,15 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
   return app
 
 
-def exit_with(pids, runner):
+def exit_with(pids, runners):
   """Stop the server once any of the processes is gone, as Slicer and its launcher are."""
   def watch():
     while all(registration.process_exists(pid) for pid in pids):
       time.sleep(2)
     logging.info("The process that started the server is gone; stopping.")
-    if hasattr(runner, "stop"):
-      runner.stop()
+    for runner in runners:
+      if hasattr(runner, "stop"):
+        runner.stop()
     os._exit(0)
   threading.Thread(target=watch, name="parent-watch", daemon=True).start()
 
@@ -347,11 +369,15 @@ def main(argv=None):
                       help="folder with the model weights; missing weights are downloaded there")
   parser.add_argument("--token", default=os.environ.get(TOKEN_ENVIRONMENT_VARIABLE),
                       help=f"access token clients must send (default: ${TOKEN_ENVIRONMENT_VARIABLE})")
+  parser.add_argument("--jobs-per-gpu", type=int, default=1,
+                      help="registrations run at the same time on each GPU; each needs its own GPU memory")
   parser.add_argument("--exit-with-parent", action="store_true",
                       help="stop when the process that started the server exits (used by Slicer)")
   parser.add_argument("--parent-pid", type=int, action="append", default=[],
                       help="also stop when this process exits; can be repeated")
   args = parser.parse_args(argv)
+  if args.jobs_per_gpu < 1:
+    parser.error("--jobs-per-gpu must be at least 1")
 
   # the same look as uvicorn's own messages
   logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
@@ -359,10 +385,10 @@ def main(argv=None):
     logging.warning("Listening on %s without an access token: anyone who can reach it can use it.", args.host)
 
   import uvicorn
-  app = create_app(args.weights_dir, args.token)
+  app = create_app(args.weights_dir, args.token, jobs_per_gpu=args.jobs_per_gpu)
   watched = args.parent_pid + ([os.getppid()] if args.exit_with_parent else [])
   if watched:
-    exit_with(watched, app.state.runner)
+    exit_with(watched, app.state.runners)
   print(f"UniGradICON server on http://{args.host}:{args.port}", flush=True)
   # no line per request: clients poll their jobs every second; the job events are logged instead
   uvicorn.run(app, host=args.host, port=args.port, access_log=False)
