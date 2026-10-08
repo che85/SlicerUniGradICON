@@ -12,6 +12,47 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
+    <layout class="QFormLayout" name="parameterSetLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="parameterNodeLabel">
+       <property name="text">
+        <string>Parameter set:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="qMRMLNodeComboBox" name="parameterNodeSelector">
+       <property name="toolTip">
+        <string>The settings shown and used for registration. Other modules can keep their own set, e.g. for a registration step.</string>
+       </property>
+       <property name="nodeTypes">
+        <stringlist>
+         <string>vtkMRMLScriptedModuleNode</string>
+        </stringlist>
+       </property>
+       <property name="showHidden">
+        <bool>true</bool>
+       </property>
+       <property name="baseName">
+        <string>UniGradICON</string>
+       </property>
+       <property name="noneEnabled">
+        <bool>false</bool>
+       </property>
+       <property name="addEnabled">
+        <bool>true</bool>
+       </property>
+       <property name="removeEnabled">
+        <bool>true</bool>
+       </property>
+       <property name="renameEnabled">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <widget class="ctkCollapsibleButton" name="InputsCollapsibleButton">
      <property name="text">
       <string>Inputs</string>
@@ -649,6 +690,12 @@
  </customwidgets>
  <resources/>
  <connections>
+  <connection>
+   <sender>UniGradICON</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>parameterNodeSelector</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+  </connection>
   <connection>
    <sender>UniGradICON</sender>
    <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>

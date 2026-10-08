@@ -131,7 +131,9 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     uiWidget = slicer.util.loadUI(self.resourcePath('UI/UniGradICON.ui'))
     self.layout.addWidget(uiWidget)
     self.ui = slicer.util.childWidgetVariables(uiWidget)
-    
+    # NB: a scene can hold several sets, e.g. one that another module made for its own registration step
+    self.ui.parameterNodeSelector.addAttribute("vtkMRMLScriptedModuleNode", "ModuleName", self.moduleName)
+
     # Set scene in MRML widgets. Make sure that in Qt designer the top-level qMRMLWidget's
     # "mrmlSceneChanged(vtkMRMLScene*)" signal in is connected to each MRML widget's.
     # "setMRMLScene(vtkMRMLScene*)" slot.
@@ -148,6 +150,13 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # These connections ensure that we update parameter node when scene is closed
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+
+    self.ui.parameterNodeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onParameterNodeSelected)
+
+    # NB: owned by the GUI, so that it cannot fire once Slicer has destroyed the GUI on exit
+    self._reconnectTimer = qt.QTimer(uiWidget)
+    self._reconnectTimer.setSingleShot(True)
+    self._reconnectTimer.timeout.connect(self.reconnectToServerQuietly)
 
     # These connections ensure that whenever user changes some settings on the GUI, that is saved in the MRML scene
     # (in the selected parameter node).
@@ -409,7 +418,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
   def scheduleReconnect(self):
     """Check the server again once the GUI is updated (see reconnectToServerQuietly)."""
-    qt.QTimer.singleShot(0, self.reconnectToServerQuietly)
+    self._reconnectTimer.start(0)
 
   def reconnectToServerQuietly(self):
     """Connect to the server of the shown parameter node again, without dialogs.
@@ -545,7 +554,25 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """
     # Parameter node stores all user choices in parameter values, node selections, etc.
     # so that when the scene is saved and reloaded, these settings are restored.
-    self.setParameterNode(self.logic.getParameterNode() if not self._parameterNode else self._parameterNode)
+    if self._parameterNode is None or not slicer.mrmlScene.IsNodePresent(self._parameterNode):
+      self.setParameterNode(self.defaultParameterNode())
+    else:
+      self.setParameterNode(self._parameterNode)
+
+  def defaultParameterNode(self):
+    """The module's own parameter node, else any other in the scene; created only if there is none."""
+    node = slicer.mrmlScene.GetSingletonNode(self.moduleName, "vtkMRMLScriptedModuleNode")
+    if node is None:
+      nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLScriptedModuleNode")
+               if n.GetAttribute("ModuleName") == self.moduleName]
+      node = nodes[0] if nodes else self.logic.getParameterNode()
+    return node
+
+  def onParameterNodeSelected(self, node):
+    if node is None and self.parent.isEntered and not slicer.mrmlScene.IsClosing():
+      node = self.defaultParameterNode()  # the last set was removed
+    if node is not self._parameterNode:
+      self.setParameterNode(node)
 
   def setParameterNode(self, inputParameterNode):
     """
@@ -564,6 +591,9 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self._parameterNode = inputParameterNode
     if self._parameterNode is not None:
       self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
+    wasBlocked = self.ui.parameterNodeSelector.blockSignals(True)
+    self.ui.parameterNodeSelector.setCurrentNode(self._parameterNode)
+    self.ui.parameterNodeSelector.blockSignals(wasBlocked)
 
     # Initial GUI update
     self.updateGUIFromParameterNode()
